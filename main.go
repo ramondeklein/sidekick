@@ -423,9 +423,8 @@ func (b *Backend) updateCallStats(t shortTraceMsg) {
 }
 
 type multisite struct {
-	sites          []*site
+	sites          atomic.Pointer[[]*site]
 	healthCanceler context.CancelFunc
-	rwLocker       sync.RWMutex
 }
 
 func (m *multisite) renewSite(ctx *cli.Context, healthCheckPath string, healthReadCheckPath string, healthCheckPort int, healthCheckDuration, healthCheckTimeout time.Duration) {
@@ -438,9 +437,9 @@ func (m *multisite) renewSite(ctx *cli.Context, healthCheckPath string, healthRe
 		site := configureSite(ctxt, ctx, i+1, strings.Split(siteStrs, ","), healthCheckPath, healthCheckPort, healthCheckDuration, healthCheckTimeout)
 		sites = append(sites, site)
 	}
-	m.rwLocker.Lock()
-	defer m.rwLocker.Unlock()
-	m.sites = sites
+
+	m.sites.Swap(&sites)
+
 	// cancel the previous health checker
 	if m.healthCanceler != nil {
 		m.healthCanceler()
@@ -464,12 +463,11 @@ func (m *multisite) displayUI(show bool) {
 }
 
 func (m *multisite) populate() {
-	m.rwLocker.RLock()
-	defer m.rwLocker.RUnlock()
+	sites := *m.sites.Load()
 
 	dspOrder := []col{colGreen} // Header
-	for i := 0; i < len(m.sites); i++ {
-		for range m.sites[i].backends {
+	for i := 0; i < len(sites); i++ {
+		for range sites[i].backends {
 			dspOrder = append(dspOrder, colGrey)
 		}
 	}
@@ -488,7 +486,7 @@ func (m *multisite) populate() {
 		cellText[i] = make([]string, len(headers))
 	}
 	cellText[0] = headers
-	for i, site := range m.sites {
+	for i, site := range sites {
 		for j, b := range site.backends {
 			b.Stats.Lock()
 			minLatency := "0s"
@@ -517,9 +515,9 @@ func (m *multisite) populate() {
 
 func (m *multisite) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "SideKick") // indicate sidekick is serving
-	m.rwLocker.RLock()
-	defer m.rwLocker.RUnlock()
-	for _, s := range m.sites {
+
+	sites := *m.sites.Load()
+	for _, s := range sites {
 		if s.Online() {
 			if r.URL.Path == healthPath {
 				// Health check endpoint should return success
